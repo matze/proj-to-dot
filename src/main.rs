@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Result};
-use tree_sitter::{Parser, Query, QueryCursor};
-use structopt::StructOpt;
-use std::io::prelude::*;
+use log::debug;
+use std::cell::RefCell;
 use std::fs::File;
-use std::path::PathBuf;
+use std::io::prelude::*;
+use std::path::{Path, PathBuf};
+use structopt::StructOpt;
+use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 #[derive(StructOpt)]
 struct Opt {
@@ -14,42 +16,98 @@ struct Opt {
     output: PathBuf,
 }
 
-fn main() -> Result<()> {
-    let opt = Opt::from_args();
+struct App {
+    lang: Language,
+    output: RefCell<File>,
+    include_query: Query,
+    definition_query: Query,
+    use_query: Query,
+}
 
-    let mut parser = Parser::new();
-    let lang = tree_sitter_coremake::language();
-    parser.set_language(lang)?;
+impl App {
+    fn new(opt: &Opt) -> Result<Self> {
+        let output = RefCell::new(File::create(&opt.output)?);
+        let lang = tree_sitter_coremake::language();
 
-    let mut output = File::create(opt.output)?;
-    writeln!(output, "digraph Uses {{")?;
-    writeln!(output, "  ratio=1.3;")?;
+        Ok(Self {
+            lang,
+            output,
+            include_query: Query::new(lang, "(include (string_literal) @glob)")?,
+            definition_query: Query::new(
+                lang,
+                "(definition (identifier) @identifier (block) @block)",
+            )?,
+            use_query: Query::new(lang, "(use_statement (identifier) @identifier)")?,
+        })
+    }
 
-    let text = std::fs::read_to_string(opt.root)?;
-    let text = text.as_bytes();
+    fn parse_real(&self, base: &Path, proj: &Path) -> Result<()> {
+        let mut parser = Parser::new();
+        parser.set_language(self.lang)?;
+        debug!("Parsing {:?}", proj);
 
-    let tree = parser
-        .parse(text, None)
-        .ok_or_else(|| anyhow!("Could not parse input"))?;
+        let text = std::fs::read_to_string(proj)?;
+        let text = text.as_bytes();
 
-    let definition_query = Query::new(lang, "(definition (identifier) @identifier (block) @block)")?;
-    let use_query = Query::new(lang, "(use_statement (identifier) @identifier)")?;
-
-    let mut cursor = QueryCursor::new();
-
-    for m in cursor.matches(&definition_query, tree.root_node(), text) {
-        let from = m.captures[0].node.utf8_text(text)?;
+        let tree = parser
+            .parse(text, None)
+            .ok_or_else(|| anyhow!("Could not parse input"))?;
 
         let mut cursor = QueryCursor::new();
 
-        for m in cursor.matches(&use_query, m.captures[1].node, text) {
-            let to = m.captures[0].node.utf8_text(text)?;
+        for include in cursor.matches(&self.include_query, tree.root_node(), text) {
+            let pattern = include.captures[0].node.utf8_text(text)?.trim_matches('"');
+            let walker = globwalk::GlobWalkerBuilder::from_patterns(base, &[pattern])
+                .build()?
+                .into_iter()
+                .filter_map(Result::ok);
 
-            writeln!(output, "  \"{}\" -> \"{}\";", from, to)?;
+            for proj in walker {
+                self.parse_real(base, proj.path())?;
+            }
         }
+
+        let mut output = self.output.borrow_mut();
+
+        for def in cursor.matches(&self.definition_query, tree.root_node(), text) {
+            let from = def.captures[0].node.utf8_text(text)?;
+
+            let mut cursor = QueryCursor::new();
+
+            for use_target in cursor.matches(&self.use_query, def.captures[1].node, text) {
+                let to = use_target.captures[0].node.utf8_text(text)?;
+                writeln!(output, "  \"{}\" -> \"{}\";", from, to)?;
+            }
+        }
+        Ok(())
     }
 
-    writeln!(output, "}}")?;
+    fn parse(&self, proj: &Path) -> Result<()> {
+        let base = proj
+            .parent()
+            .ok_or_else(|| anyhow!("{:?} must be an absolute path", proj))?;
+
+        {
+            let mut output = self.output.borrow_mut();
+
+            writeln!(output, "digraph Uses {{")?;
+            writeln!(output, "  ratio=1.3;")?;
+        }
+
+        self.parse_real(base, proj)?;
+
+        let mut output = self.output.borrow_mut();
+        writeln!(output, "}}")?;
+
+        Ok(())
+    }
+}
+
+fn main() -> Result<()> {
+    env_logger::init();
+
+    let opt = Opt::from_args();
+    App::new(&opt)?.parse(&opt.root)?;
 
     Ok(())
 }

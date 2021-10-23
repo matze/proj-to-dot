@@ -7,6 +7,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+env_logger = "0"
+globwalk = "0"
+log = "0"
 structopt = "0"
 tree-sitter = "0.20.0"
 tree-sitter-coremake = { git = "https://github.com/matze/tree-sitter-coremake" }
