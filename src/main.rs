@@ -41,7 +41,7 @@ impl App {
         })
     }
 
-    fn parse_real(&self, base: &Path, proj: &Path) -> Result<()> {
+    fn parse_real(&self, proj: &Path) -> Result<()> {
         let mut parser = Parser::new();
         parser.set_language(self.lang)?;
         debug!("Parsing {:?}", proj);
@@ -57,13 +57,14 @@ impl App {
 
         for include in cursor.matches(&self.include_query, tree.root_node(), text) {
             let pattern = include.captures[0].node.utf8_text(text)?.trim_matches('"');
+            let base = proj.parent().ok_or_else(|| anyhow!("No parent"))?;
             let walker = globwalk::GlobWalkerBuilder::from_patterns(base, &[pattern])
                 .build()?
                 .into_iter()
                 .filter_map(Result::ok);
 
             for proj in walker {
-                self.parse_real(base, proj.path())?;
+                self.parse_real(proj.path())?;
             }
         }
 
@@ -83,10 +84,6 @@ impl App {
     }
 
     fn parse(&self, proj: &Path) -> Result<()> {
-        let base = proj
-            .parent()
-            .ok_or_else(|| anyhow!("{:?} must be an absolute path", proj))?;
-
         {
             let mut output = self.output.borrow_mut();
 
@@ -94,7 +91,7 @@ impl App {
             writeln!(output, "  ratio=1.3;")?;
         }
 
-        self.parse_real(base, proj)?;
+        self.parse_real(proj)?;
 
         let mut output = self.output.borrow_mut();
         writeln!(output, "}}")?;
